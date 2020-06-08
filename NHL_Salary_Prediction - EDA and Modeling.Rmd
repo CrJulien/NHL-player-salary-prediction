@@ -1,0 +1,235 @@
+---
+title: "NHL Salary Prediction"
+author: "Julien Crabié"
+date: "28 November 2018"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Install all required packages
+```{r}
+library('randomForest')
+library('plyr')
+library('stringr')
+library('eeptools')
+library(data.table)
+library(corrplot)
+library(tidyr)
+library(MLmetrics)
+library(MASS)
+
+```
+
+Load the Train, Test and Output Datasets
+```{r}
+
+train = read.csv("train.csv", header = TRUE, stringsAsFactors=FALSE)
+test = read.csv("test.csv", header = TRUE, stringsAsFactors=FALSE)
+y_test <- read.csv("test_salaries.csv", header = TRUE)
+
+```
+
+Check the total number of NA's in the dataset
+```{r}
+train_sample = head(train, 20)
+sum(is.na(train))
+sum(is.na(test))
+
+```
+
+Number of NA's column wise and row wise in the train set
+```{r}
+#Number of NA's col wise
+NA_df_col_num =data.frame(sapply(train, function(x) sum(is.na(x))))
+
+#Number of NA's row wise
+NA_df_row_num = data.frame(apply(train, MARGIN = 1, function(x) sum(is.na(x))))
+```
+
+Number of NA's column wise and row wise in the test set
+```{r}
+#Number of NA's col wise
+NA_df_col_test =data.frame(sapply(test, function(x) sum(is.na(x))))
+
+#Number of NA's row wise
+NA_df_row_test = data.frame(apply(test, MARGIN = 1, function(x) sum(is.na(x))))
+
+```
+
+Remove the entry with the most number of NA's from the train set
+```{r}
+train<-train[!(train$First.Name=="Dan" & train$Last.Name=="Renouf"),]
+
+```
+
+Create a new column 'Age' based on the the existing 'Born' in the train
+```{r}
+
+train$Prefix = ifelse(as.numeric(substr(train$Born, start = 1, stop = 2)) <= 5, 20, 19)
+
+train$Age = round(age_calc(as.Date(paste(train$Prefix,train$Born, sep = "")),as.Date("2016-10-01"), units = 'years'))
+
+train$Prefix = NULL
+
+```
+
+Create the 'Age' column in the test dataset too
+```{r}
+test$Prefix = ifelse(as.numeric(substr(test$Born, start = 1, stop = 2)) <= 5, 20, 19)
+
+test$Age = round(age_calc(as.Date(paste(test$Prefix,test$Born, sep = "")),as.Date("2016-10-01"), units = 'years'))
+
+test$Prefix = NULL
+```
+
+Create a new column 'Experience' based on the first drafted year of the player. Replace the missing values in Experience, Ovrl and DrftRd columns as shown below. 
+```{r}
+train$Experience = round(2017 - train$DftYr , 1)
+train$Experience[is.na(train$Experience)] <- 0
+
+train$DftRd[is.na(train$DftRd)] <- 10
+train$Ovrl[is.na(train$Ovrl)] <- 0
+
+test$Experience = round(2017 - test$DftYr , 1)
+test$Experience[is.na(test$Experience)] <- 0
+
+test$DftRd[is.na(test$DftRd)] <- 10
+test$Ovrl[is.na(test$Ovrl)] <- 0
+
+```
+
+Manually eliminate the variables which are highly correlated to be fed into the model. Also replacing the other NA's with the mean of their corresponding column
+```{r}
+chosen = train[, c(1,7,8,10:12,15:17,22,24:25,29,32:35,38,40,42,43,44,45,46,49,50,52,55,60,61,67,68,72,73,85:96,98:107,110,114:116,120,146,147,150:156)]
+
+
+tokeep <- which(sapply(chosen,is.numeric))
+train_num = chosen[ , tokeep]
+
+# Replace NA's with mean of column
+for(i in 1:ncol(train_num)){
+  train_num[is.na(train_num[,i]), i] <- mean(train_num[,i], na.rm = TRUE)
+  
+}
+
+```
+
+Follow the same steps on the test dataset too.
+```{r}
+
+test_df = cbind(y_test, test)
+test = test_df[, c(1,7,8,10:12,15:17,22,24:25,29,32:35,38,40,42,43,44,45,46,49,50,52,55,60,61,67,68,72,73,85:96,98:107,110,114:116,120,146,147,150:156)]
+
+
+tokeep_test <- which(sapply(test,is.numeric))
+
+test = test[ , tokeep_test]
+
+# Replace NA's with mean of column
+for(i in 1:ncol(test)){
+  test[is.na(test[,i]), i] <- mean(test[,i], na.rm = TRUE)
+  
+}
+
+```
+
+Fine tune the variable selection by using a random forest method of feature selection.
+```{r}
+# Random Forest Feature Selection
+
+rf_model = randomForest(Salary ~ ., data=train_num, importance=TRUE, ntree=100)
+
+importance = importance(rf_model)
+
+varImpPlot(rf_model)
+
+```
+
+Sort the variables based on the decreasing order of the variable importance values obtained on running the random forest model
+```{r}
+
+varImportance = data.frame(Variables = row.names(importance), 
+                           Importance = round(importance[ ,'%IncMSE'],2))
+
+#Create a rank variable based on importance
+rankImportance <- varImportance %>%
+  mutate(Rank = rank(desc(Importance)))
+
+#Plot the rank to see the importance of variables clearly
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+                           y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+            hjust=0, vjust=0.55, size = 4, colour = 'orange') +
+  labs(x = 'Variables') +
+  coord_flip()
+
+
+```
+
+Choose the top few variables based on the importance and create the final test and train data sets to be included into the model.
+```{r}
+imp_var = subset(rankImportance, Rank <= 70)
+
+imp_ones = imp_var$Variables
+
+final_df = train_num[imp_ones]
+final_df$Salary = train_num$Salary
+
+final_test = test[imp_ones]
+final_test$Salary = test$Salary
+
+cor_final = cor(final_df)
+corrplot(cor_final, method = 'square')
+
+```
+
+```{r}
+lm_model = lm(Salary ~ . , data = final_df)
+
+y_pred = predict(lm_model, final_test[,-which(names(final_test) == "Salary")])
+
+lm_model
+sm = summary(lm_model)
+
+cor(y_test$Salary, y_pred)
+
+mean(sm$r.squared)
+
+
+```
+
+Compute the RMSE for the linear model
+```{r}
+RSS = c(crossprod(lm_model$residuals))
+MSE = RSS / length(lm_model$residuals)
+RMSE = sqrt(MSE)
+RMSE
+```
+
+Compute the MAPE of the mulitple linear regression model
+```{r}
+MAPE(y_pred, y_test$Salary)
+```
+
+Let's try building a random forest regression model. 
+```{r}
+rf_regr = randomForest(Salary ~. , data = final_df, ntree = 75 )
+rf_regr
+
+y_rf = predict(rf_regr, final_test[,-which(names(final_test) == "Salary")])
+
+```
+
+Compute the MAPE for the random forest model
+```{r}
+MAPE(y_rf, y_test$Salary)
+```
+
+On comparing between the Mean Accuracy Percentage Error between the two regression models, we find that the random forest regression model gives us a better accuracy. This is mainly because the random forest models fits the data to the model very well.
+
